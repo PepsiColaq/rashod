@@ -1,5 +1,6 @@
 /**
  * Cloudflare Worker — распознавание расхода через Polza.ai (Gemini).
+ * Два прохода: основной + перепроверка спорных/+−.
  */
 
 const CORS = {
@@ -10,6 +11,7 @@ const CORS = {
 }
 
 const POLZA_URL = 'https://polza.ai/api/v1/chat/completions'
+const DEFAULT_MODEL = 'google/gemini-2.5-pro'
 
 const MARK_ALIASES = {
   present: 'present',
@@ -66,26 +68,54 @@ function buildPrompt({ day, group, roster }) {
   const list = roster.map((p, i) => `${i + 1}. ${p.fullName}`).join('\n')
   const n = roster.length
 
-  return `OCR графика посещаемости. Прочитай ТОЛЬКО столбец дня ${day}.
+  return `Ты внимательный OCR табличного графика посещаемости.
 
-Легенда → mark:
-+ = present
-- или жирный минус поверх плюса = absent
-Н = duty
-О = excused
-Б = sick
-Н/П = unknown
-С = unauthorized
+Шаг 1: найди в ШАПКЕ таблицы число ${day} (день месяца). Это единственный нужный столбец.
+Не читай соседние дни (${day - 1}, ${day + 1} и т.д.).
+
+Шаг 2: иди СВЕРХУ ВНИЗ по строкам с ФИО. Строка i списка = i-я фамилия на листе.
+Для КАЖДОЙ строки смотри ТОЛЬКО клетку на пересечении этой строки и столбца ${day}.
+
+Легенда mark:
+горизонтальная чёрточка − / - = absent (НЕТ человека)
+крест + = present (ЕСТЬ)
+кириллическая Н (как латинская H) = duty (наряд)
+О = excused, Б = sick, Н/П = unknown, С = unauthorized
 пусто = empty
+Если жирный − поверх + → absent.
 
-Строка 1 списка = первая ФИО на листе, и так далее.
-Группа ${group}. Список (${n} чел.):
+Частые ошибки — НЕ делай так:
+- не путай + и − (плюс имеет вертикальную линию, минус — только горизонталь);
+- не сдвигай отметку на строку выше/ниже;
+- не бери отметку из соседнего дня.
+
+Группа ${group}. Список ровно ${n} человек:
 ${list}
 
-Верни ТОЛЬКО валидный JSON одной строкой, без markdown и без комментариев:
-{"day":${day},"marks":["present","absent","duty"]}
+Ответ — строго JSON без markdown:
+{"day":${day},"marks":["present","absent",...]}
+В marks ровно ${n} значений, порядок = порядок списка.`
+}
 
-В marks ровно ${n} строк, порядок как в списке выше. Только латиница из легенды.`
+function buildVerifyPrompt({ day, roster, firstMarks }) {
+  const lines = roster
+    .map((p, i) => `${i + 1}. ${p.fullName} → было: ${firstMarks[i] || 'empty'}`)
+    .join('\n')
+  const n = roster.length
+
+  return `ПЕРЕПРОВЕРКА. Тот же лист. Столбец дня ${day} только.
+
+Ниже черновик первого прохода. Исправь ошибки. Особенно проверь:
+- у кого стоит absent — точно ли в клетке дня ${day} минус, а не плюс;
+- у кого стоит present — точно ли плюс, а не минус;
+- наряды (Н) не перепутаны со строками соседей.
+
+Черновик:
+${lines}
+
+Верни исправленный JSON:
+{"day":${day},"marks":["present","absent",...]}
+Ровно ${n} mark в том же порядке строк.`
 }
 
 function repairJson(text) {
@@ -97,9 +127,7 @@ function repairJson(text) {
   const end = s.lastIndexOf('}')
   if (start === -1 || end === -1) throw new Error('В ответе нет JSON')
   s = s.slice(start, end + 1)
-  // trailing commas
   s = s.replace(/,\s*([}\]])/g, '$1')
-  // smart quotes
   s = s.replace(/[“”«»]/g, '"').replace(/[‘’]/g, "'")
   return s
 }
@@ -110,18 +138,14 @@ function extractJson(text) {
   try {
     return JSON.parse(repaired)
   } catch (firstErr) {
-    // fallback: вытащить массив marks по regex
     const marksMatch = repaired.match(/"marks"\s*:\s*\[([\s\S]*?)\]/)
     if (marksMatch) {
       const parts = marksMatch[1]
         .split(',')
         .map((x) => x.replace(/[^a-zA-Zа-яА-ЯёЁ+\-−/]/g, '').trim())
         .filter(Boolean)
-      if (parts.length) {
-        return { marks: parts, day: null, _repaired: true }
-      }
+      if (parts.length) return { marks: parts, day: null, _repaired: true }
     }
-    // fallback: students objects
     const objs = [...repaired.matchAll(/"mark"\s*:\s*"([^"]+)"/gi)].map((m) => ({
       mark: m[1],
     }))
@@ -130,43 +154,55 @@ function extractJson(text) {
   }
 }
 
-function normalizeResult(parsed, roster) {
-  let incoming = []
-  if (Array.isArray(parsed?.marks)) {
-    incoming = parsed.marks.map((mark) => ({ mark }))
-  } else if (Array.isArray(parsed?.students)) {
-    incoming = parsed.students
-  }
+function marksFromParsed(parsed, rosterLen) {
+  let raw = []
+  if (Array.isArray(parsed?.marks)) raw = parsed.marks
+  else if (Array.isArray(parsed?.students)) raw = parsed.students.map((s) => s.mark)
 
-  const bySurname = new Map()
-  for (const s of incoming) {
-    const key = String(s?.surname || '')
-      .trim()
-      .toLowerCase()
-    if (key) bySurname.set(key, s)
+  const out = []
+  for (let i = 0; i < rosterLen; i++) {
+    out.push(normalizeMark(raw[i]) || 'empty')
   }
+  return out
+}
 
-  const students = roster.map((r, i) => {
-    const hit = bySurname.get(String(r.surname).toLowerCase()) || incoming[i] || {}
-    const mark = normalizeMark(hit.mark) || 'empty'
-    const confidence =
-      typeof hit.confidence === 'number'
-        ? hit.confidence
-        : mark === 'empty'
-          ? 0.2
-          : 0.7
+function mergeMarks(first, second) {
+  // второй проход приоритетнее; при расхождении confidence ниже
+  return first.map((a, i) => {
+    const b = second[i] || a
     return {
-      surname: r.surname,
-      mark,
-      confidence,
-      rawMark: hit.mark ?? null,
+      mark: b,
+      confidence: a === b ? 0.92 : 0.55,
+      disagreed: a !== b,
+      firstMark: a,
     }
   })
+}
 
+function normalizeResult(merged, roster, day) {
+  const students = roster.map((r, i) => {
+    const hit = merged[i] || { mark: 'empty', confidence: 0.2 }
+    return {
+      surname: r.surname,
+      mark: hit.mark,
+      confidence: hit.confidence,
+      rawMark: hit.firstMark ?? null,
+      disagreed: !!hit.disagreed,
+    }
+  })
+  return { day, students }
+}
+
+function sumUsage(a, b) {
+  if (!a && !b) return null
+  const x = a || {}
+  const y = b || {}
   return {
-    group: parsed?.group || null,
-    day: parsed?.day ?? null,
-    students,
+    prompt_tokens: (x.prompt_tokens || 0) + (y.prompt_tokens || 0),
+    completion_tokens: (x.completion_tokens || 0) + (y.completion_tokens || 0),
+    total_tokens: (x.total_tokens || 0) + (y.total_tokens || 0),
+    cost_rub: Number(x.cost_rub ?? x.cost ?? 0) + Number(y.cost_rub ?? y.cost ?? 0),
+    cost: Number(x.cost_rub ?? x.cost ?? 0) + Number(y.cost_rub ?? y.cost ?? 0),
   }
 }
 
@@ -180,7 +216,7 @@ async function callPolza(env, { model, prompt, dataUrl }) {
     body: JSON.stringify({
       model,
       temperature: 0,
-      max_tokens: 2500,
+      max_tokens: 3000,
       response_format: { type: 'json_object' },
       messages: [
         {
@@ -228,8 +264,10 @@ export default {
     }
 
     const url = new URL(request.url)
+    const model = env.MODEL || DEFAULT_MODEL
+
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
-      return json({ ok: true, model: env.MODEL || 'google/gemini-3.8-flash' })
+      return json({ ok: true, model })
     }
 
     if (request.method === 'POST' && url.pathname.endsWith('/auth')) {
@@ -278,39 +316,51 @@ export default {
       ? imageBase64
       : `data:${mimeType};base64,${imageBase64}`
 
-    const model = env.MODEL || 'google/gemini-3.8-flash'
-    const prompt = buildPrompt({ day: dayNum, group: group || '0903-ПД3', roster })
+    const g = group || '0903-ПД3'
 
-    let upstreamJson
     try {
-      upstreamJson = await callPolza(env, { model, prompt, dataUrl })
-    } catch (err) {
-      return json(
-        { error: err.message || String(err), detail: err.detail || null },
-        err.status || 502,
+      const firstUp = await callPolza(env, {
+        model,
+        prompt: buildPrompt({ day: dayNum, group: g, roster }),
+        dataUrl,
+      })
+      const firstMarks = marksFromParsed(
+        extractJson(firstUp?.choices?.[0]?.message?.content),
+        roster.length,
       )
-    }
 
-    const content = upstreamJson?.choices?.[0]?.message?.content
-    try {
-      const parsed = extractJson(content)
-      const result = normalizeResult(parsed, roster)
+      const verifyUp = await callPolza(env, {
+        model,
+        prompt: buildVerifyPrompt({ day: dayNum, roster, firstMarks }),
+        dataUrl,
+      })
+      const secondMarks = marksFromParsed(
+        extractJson(verifyUp?.choices?.[0]?.message?.content),
+        roster.length,
+      )
+
+      const merged = mergeMarks(firstMarks, secondMarks)
+      const result = normalizeResult(merged, roster, dayNum)
       const filled = result.students.filter((s) => s.mark !== 'empty').length
+      const disagreed = result.students.filter((s) => s.disagreed).length
+      const usage = sumUsage(firstUp.usage, verifyUp.usage)
+
       return json({
         ok: true,
         model,
-        usage: upstreamJson.usage || null,
+        verified: true,
+        disagreed,
+        usage,
         filled,
         result,
       })
     } catch (err) {
       return json(
         {
-          error: 'Модель вернула битый ответ. Нажми «Распознать» ещё раз.',
-          detail: err.message || String(err),
-          raw: String(content || '').slice(0, 1500),
+          error: err.message || 'Ошибка распознавания',
+          detail: err.detail || null,
         },
-        502,
+        err.status || 502,
       )
     }
   },

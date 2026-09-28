@@ -177,7 +177,7 @@ async function recognize() {
   }
 
   state.busy = true
-  setStatus('Распознаю столбец дня…')
+  setStatus('Распознаю и перепроверяю столбец (Pro, 2 прохода)…')
 
   try {
     const res = await fetch(recognizeUrl(), {
@@ -246,6 +246,7 @@ async function recognize() {
         reason: '',
         event: false,
         confidence: typeof hit?.confidence === 'number' ? hit.confidence : null,
+        disagreed: !!hit.disagreed,
       }
     })
 
@@ -256,6 +257,7 @@ async function recognize() {
     ).length
     const dutyN = state.people.filter((p) => p.mark === 'duty').length
     const emptyN = state.people.filter((p) => p.mark === 'empty').length
+    const disagreedN = state.people.filter((p) => p.disagreed).length
     const cost = data.usage?.cost_rub ?? data.usage?.cost
 
     if (emptyN === state.people.length) {
@@ -264,11 +266,16 @@ async function recognize() {
         true,
       )
     } else {
-      setStatus(
-        `Готово: +${presentN}, нет ${absentN}, наряд ${dutyN}${emptyN ? `, пусто ${emptyN}` : ''}${
-          cost != null ? ` (~${Number(cost).toFixed(2)} ₽)` : ''
-        }. Проверь и допиши причины.`,
-      )
+      const bits = [
+        `Готово (2 прохода Pro)`,
+        `+${presentN}`,
+        `нет ${absentN}`,
+        `наряд ${dutyN}`,
+      ]
+      if (emptyN) bits.push(`пусто ${emptyN}`)
+      if (disagreedN) bits.push(`спорных ${disagreedN} — проверь`)
+      if (cost != null) bits.push(`~${Number(cost).toFixed(2)} ₽`)
+      setStatus(bits.join('. ') + '. Допиши причины при необходимости.')
     }
   } catch (err) {
     setStatus(err.message || String(err), true)
@@ -402,8 +409,8 @@ function render() {
               <div class="person-top">
                 <div class="person-name">${p.surname}</div>
                 ${
-                  low || p.mark === 'empty'
-                    ? `<span class="badge warn">${MARKS[p.mark]?.label || 'проверить'}</span>`
+                  low || p.mark === 'empty' || p.disagreed
+                    ? `<span class="badge warn">${p.disagreed ? 'спорно — проверь' : MARKS[p.mark]?.label || 'проверить'}</span>`
                     : `<span class="badge">${MARKS[p.mark]?.short || '?'} ${MARKS[p.mark]?.label || ''}</span>`
                 }
               </div>

@@ -4,4 +4,4 @@ compatibility_date = "2025-03-01"
 account_id = "f93d2af3523d8c66bcf85b4367cd9eaf"
 
 [vars]
-MODEL = "google/gemini-3.8-flash"
+MODEL = "google/gemini-2.5-pro"
