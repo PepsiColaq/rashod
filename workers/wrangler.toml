@@ -1,0 +1,6 @@
+name = "rashod-api"
+main = "recognize.js"
+compatibility_date = "2025-03-01"
+
+[vars]
+MODEL = "google/gemini-3.8-flash"
