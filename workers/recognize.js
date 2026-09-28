@@ -99,24 +99,82 @@ ${list}
 }
 
 function buildVerifyPrompt({ day, roster, firstMarks }) {
-  const lines = roster
-    .map((p, i) => `${i + 1}. ${p.fullName} → было: ${firstMarks[i] || 'empty'}`)
-    .join('\n')
-  const n = roster.length
+  const suspect = []
+  const presentish = []
+  firstMarks.forEach((m, i) => {
+    const line = `${i + 1}. ${roster[i].fullName} (сейчас: ${m})`
+    if (m !== 'present') suspect.push(line)
+    else presentish.push(line)
+  })
 
-  return `ПЕРЕПРОВЕРКА. Тот же лист. Столбец дня ${day} только.
+  return `ПЕРЕПРОВЕРКА столбца дня ${day} (только этот столбец).
 
-Ниже черновик первого прохода. Исправь ошибки. Особенно проверь:
-- у кого стоит absent — точно ли в клетке дня ${day} минус, а не плюс;
-- у кого стоит present — точно ли плюс, а не минус;
-- наряды (Н) не перепутаны со строками соседей.
+Задача НЕ перечитывать весь список заново, а найти ОШИБКИ черновика.
 
-Черновик:
-${lines}
+1) Подтверди или исправь тех, кто НЕ present:
+${suspect.length ? suspect.join('\n') : '(никого)'}
 
-Верни исправленный JSON:
-{"day":${day},"marks":["present","absent",...]}
-Ровно ${n} mark в том же порядке строк.`
+2) Среди тех, кто помечен present, найди пропущенные минусы/Н/О/Б.
+Особенно внимательно строки 1–12. Минус = только горизонтальная черта без вертикали.
+${presentish.slice(0, 12).join('\n')}
+
+Верни JSON:
+{"fixes":[{"i":2,"mark":"absent","reason":"в клетке дня ${day} минус"}]}
+
+Правила:
+- i — номер строки с 1 как в списке;
+- mark только: present, absent, duty, excused, sick, unknown, unauthorized, empty;
+- включай в fixes ТОЛЬКО реальные исправления;
+- если черновик верный — {"fixes":[]}.`
+}
+
+function applyFixes(firstMarks, fixes) {
+  const out = firstMarks.map((mark) => ({
+    mark,
+    confidence: 0.8,
+    disagreed: false,
+    firstMark: mark,
+  }))
+
+  if (!Array.isArray(fixes)) return out
+
+  for (const fix of fixes) {
+    const i = Number(fix?.i) - 1
+    if (!Number.isInteger(i) || i < 0 || i >= out.length) continue
+    const next = normalizeMark(fix.mark)
+    if (!next) continue
+    const prev = out[i].mark
+    out[i] = {
+      mark: next,
+      confidence: prev === next ? 0.9 : 0.7,
+      disagreed: prev !== next,
+      firstMark: prev,
+    }
+  }
+  return out
+}
+
+function fixesFromParsed(parsed) {
+  if (Array.isArray(parsed?.fixes)) return parsed.fixes
+  // если модель снова вернула полный marks — применяем только отличия от first позже
+  return null
+}
+
+function mergeFullSecondAsDiffOnly(first, second) {
+  // запасной путь: второй полный массив не затирает первый целиком
+  return first.map((a, i) => {
+    const b = second[i] || a
+    if (a === b) {
+      return { mark: a, confidence: 0.92, disagreed: false, firstMark: a }
+    }
+    if (a === 'present' && b !== 'present' && b !== 'empty') {
+      return { mark: b, confidence: 0.65, disagreed: true, firstMark: a }
+    }
+    if (a !== 'present' && b === 'present') {
+      return { mark: b, confidence: 0.65, disagreed: true, firstMark: a }
+    }
+    return { mark: a, confidence: 0.5, disagreed: true, firstMark: a }
+  })
 }
 
 function repairJson(text) {
@@ -165,19 +223,6 @@ function marksFromParsed(parsed, rosterLen) {
     out.push(normalizeMark(raw[i]) || 'empty')
   }
   return out
-}
-
-function mergeMarks(first, second) {
-  // второй проход приоритетнее; при расхождении confidence ниже
-  return first.map((a, i) => {
-    const b = second[i] || a
-    return {
-      mark: b,
-      confidence: a === b ? 0.92 : 0.55,
-      disagreed: a !== b,
-      firstMark: a,
-    }
-  })
 }
 
 function normalizeResult(merged, roster, day) {
@@ -336,12 +381,19 @@ export default {
         prompt: buildVerifyPrompt({ day: dayNum, roster, firstMarks }),
         dataUrl,
       })
-      const secondMarks = marksFromParsed(
-        extractJson(verifyUp?.choices?.[0]?.message?.content),
-        roster.length,
-      )
+      const verifyParsed = extractJson(verifyUp?.choices?.[0]?.message?.content)
+      const fixes = fixesFromParsed(verifyParsed)
 
-      const merged = mergeMarks(firstMarks, secondMarks)
+      let merged
+      if (fixes) {
+        merged = applyFixes(firstMarks, fixes)
+      } else if (Array.isArray(verifyParsed?.marks) || Array.isArray(verifyParsed?.students)) {
+        const secondMarks = marksFromParsed(verifyParsed, roster.length)
+        merged = mergeFullSecondAsDiffOnly(firstMarks, secondMarks)
+      } else {
+        merged = applyFixes(firstMarks, [])
+      }
+
       const result = normalizeResult(merged, roster, dayNum)
       const filled = result.students.filter((s) => s.mark !== 'empty').length
       const disagreed = result.students.filter((s) => s.disagreed).length
@@ -353,6 +405,7 @@ export default {
         verifyModel,
         verified: true,
         disagreed,
+        fixesApplied: Array.isArray(fixes) ? fixes.length : null,
         usage,
         filled,
         result,
