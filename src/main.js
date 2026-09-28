@@ -64,7 +64,30 @@ function defaultPeople() {
   }))
 }
 
+const ACCESS_STORAGE_KEY = 'rashod_access_code'
+
+function getStoredAccessCode() {
+  try {
+    return sessionStorage.getItem(ACCESS_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function setStoredAccessCode(code) {
+  try {
+    if (code) sessionStorage.setItem(ACCESS_STORAGE_KEY, code)
+    else sessionStorage.removeItem(ACCESS_STORAGE_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
 const state = {
+  accessCode: getStoredAccessCode(),
+  unlocked: false,
+  authBusy: false,
+  authError: '',
   date: todayIso(),
   imageDataUrl: '',
   people: defaultPeople(),
@@ -82,13 +105,67 @@ function setStatus(msg, isError = false) {
   render()
 }
 
+function apiUrl(path) {
+  if (apiBase) return `${apiBase}${path}`
+  return `/api${path}`
+}
+
 function recognizeUrl() {
-  if (apiBase) return `${apiBase}/recognize`
-  // dev proxy: vite → worker
-  return '/api/recognize'
+  return apiUrl('/recognize')
+}
+
+function authUrl() {
+  return apiUrl('/auth')
+}
+
+async function unlock(code) {
+  const trimmed = String(code || '').trim()
+  if (!trimmed) {
+    state.authError = 'Введи код доступа'
+    render()
+    return
+  }
+  state.authBusy = true
+  state.authError = ''
+  render()
+  try {
+    const res = await fetch(authUrl(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Access-Code': trimmed,
+      },
+      body: JSON.stringify({ accessCode: trimmed }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Неверный код')
+    }
+    state.accessCode = trimmed
+    state.unlocked = true
+    setStoredAccessCode(trimmed)
+  } catch (err) {
+    state.unlocked = false
+    state.authError = err.message || String(err)
+  } finally {
+    state.authBusy = false
+    render()
+  }
+}
+
+function lock() {
+  state.unlocked = false
+  state.accessCode = ''
+  setStoredAccessCode('')
+  state.authError = ''
+  render()
 }
 
 async function recognize() {
+  if (!state.unlocked || !state.accessCode) {
+    setStatus('Сначала введи код доступа', true)
+    return
+  }
   if (!state.imageDataUrl) {
     setStatus('Сначала выбери фото листа', true)
     return
@@ -105,17 +182,25 @@ async function recognize() {
   try {
     const res = await fetch(recognizeUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Access-Code': state.accessCode,
+      },
       body: JSON.stringify({
         imageBase64: state.imageDataUrl,
         mimeType: 'image/jpeg',
         day,
         group: GROUP_CODE,
         roster: ROSTER,
+        accessCode: state.accessCode,
       }),
     })
 
     const data = await res.json().catch(() => ({}))
+    if (res.status === 401) {
+      lock()
+      throw new Error(data.error || 'Код доступа не принят')
+    }
     if (!res.ok || !data.ok) {
       const extra = data.detail ? ` (${typeof data.detail === 'string' ? data.detail : ''})` : ''
       throw new Error((data.error || `Ошибка API (${res.status})`) + extra)
@@ -222,7 +307,38 @@ async function copyText() {
   }
 }
 
+function renderGate() {
+  app.innerHTML = `
+    <section class="card gate">
+      <h1>Расход ${GROUP_CODE}</h1>
+      <p class="sub">Доступ только по коду — чтобы API не жрали чужие</p>
+      <label>
+        Код доступа
+        <input id="access-code" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Введи код" />
+      </label>
+      <div class="actions">
+        <button class="primary" id="unlock" ${state.authBusy ? 'disabled' : ''}>
+          ${state.authBusy ? 'Проверяю…' : 'Войти'}
+        </button>
+      </div>
+      <div class="status ${state.authError ? 'error' : ''}">${state.authError || ''}</div>
+    </section>
+  `
+  const input = app.querySelector('#access-code')
+  const go = () => unlock(input.value)
+  app.querySelector('#unlock').addEventListener('click', go)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') go()
+  })
+  input.focus()
+}
+
 function render() {
+  if (!state.unlocked) {
+    renderGate()
+    return
+  }
+
   const text = buildRashodText({
     group: GROUP_CODE,
     dateLabel: formatDateRu(state.date),
@@ -230,8 +346,13 @@ function render() {
   })
 
   app.innerHTML = `
-    <h1>Расход ${GROUP_CODE}</h1>
-    <p class="sub">Фото графика → правка → готовый текст в группу командиров</p>
+    <div class="topbar">
+      <div>
+        <h1>Расход ${GROUP_CODE}</h1>
+        <p class="sub">Фото графика → правка → готовый текст в группу командиров</p>
+      </div>
+      <button type="button" class="ghost" id="logout">Выйти</button>
+    </div>
 
     <section class="card">
       <div class="row two">
@@ -327,6 +448,8 @@ function render() {
     </section>
   `
 
+  app.querySelector('#logout').addEventListener('click', () => lock())
+
   app.querySelector('#date').addEventListener('change', (e) => {
     state.date = e.target.value
     render()
@@ -413,4 +536,12 @@ function escapeAttr(s) {
   return String(s).replaceAll('"', '&quot;').replaceAll('<', '&lt;')
 }
 
-render()
+async function boot() {
+  if (state.accessCode) {
+    await unlock(state.accessCode)
+    return
+  }
+  render()
+}
+
+boot()

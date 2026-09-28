@@ -33,6 +33,27 @@ body {
   padding: 20px 16px 48px;
 }
 
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.topbar h1 {
+  margin-bottom: 4px;
+}
+
+.gate {
+  margin-top: 40px;
+}
+
+.gate input {
+  font-size: 1.1rem;
+  letter-spacing: 0.08em;
+}
+
 h1 {
   margin: 0 0 4px;
   font-size: 1.55rem;

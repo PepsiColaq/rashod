@@ -21,6 +21,7 @@ body = json.dumps(
         "day": 28,
         "group": "0903-ПД3",
         "roster": roster,
+        "accessCode": "91271732100",
     },
     ensure_ascii=False,
 ).encode("utf-8")
@@ -31,6 +32,7 @@ req = urllib.request.Request(
         "Content-Type": "application/json; charset=utf-8",
         "User-Agent": "Mozilla/5.0",
         "Origin": "https://pepsicolaq.github.io",
+        "X-Access-Code": "91271732100",
     },
 )
 with urllib.request.urlopen(req, timeout=180) as r:

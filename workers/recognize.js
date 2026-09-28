@@ -5,7 +5,7 @@
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'content-type',
+  'Access-Control-Allow-Headers': 'content-type,x-access-code',
   'Access-Control-Max-Age': '86400',
 }
 
@@ -213,6 +213,14 @@ async function callPolza(env, { model, prompt, dataUrl }) {
   return upstreamJson
 }
 
+function accessOk(request, body, env) {
+  const expected = String(env.ACCESS_CODE || '').trim()
+  if (!expected) return false
+  const fromHeader = (request.headers.get('x-access-code') || '').trim()
+  const fromBody = String(body?.accessCode || '').trim()
+  return fromHeader === expected || fromBody === expected
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -222,6 +230,19 @@ export default {
     const url = new URL(request.url)
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
       return json({ ok: true, model: env.MODEL || 'google/gemini-3.8-flash' })
+    }
+
+    if (request.method === 'POST' && url.pathname.endsWith('/auth')) {
+      let body = {}
+      try {
+        body = await request.json()
+      } catch {
+        body = {}
+      }
+      if (!accessOk(request, body, env)) {
+        return json({ ok: false, error: 'Неверный код доступа' }, 401)
+      }
+      return json({ ok: true })
     }
 
     if (request.method !== 'POST' || !url.pathname.endsWith('/recognize')) {
@@ -237,6 +258,10 @@ export default {
       body = await request.json()
     } catch {
       return json({ error: 'Неверный JSON' }, 400)
+    }
+
+    if (!accessOk(request, body, env)) {
+      return json({ error: 'Нужен код доступа' }, 401)
     }
 
     const { imageBase64, mimeType = 'image/jpeg', day, group, roster } = body || {}
