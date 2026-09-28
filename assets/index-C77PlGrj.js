@@ -5,7 +5,7 @@
       <p class="sub">Доступ только по коду</p>
       <label>
         Код доступа
-        <input id="access-code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Введи код" />
+        <input id="access-code" type="text" autocomplete="one-time-code" placeholder="Введи код" spellcheck="false" />
       </label>
       <div class="actions">
         <button class="primary" id="unlock" ${t.authBusy?"disabled":""}>
