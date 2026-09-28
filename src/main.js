@@ -206,9 +206,14 @@ function render() {
 
       <div class="file-zone" style="margin-top:12px">
         <strong>Фото листа посещаемости</strong>
-        <span>С телефона можно сразу с камеры</span>
-        <input id="file" type="file" accept="image/*" capture="environment" />
+        <span>Галерея или камера</span>
+        <input id="file" type="file" accept="image/*" />
       </div>
+      <div class="actions" style="margin-top:8px">
+        <button type="button" class="ghost" id="pick-gallery">Из галереи</button>
+        <button type="button" class="ghost" id="pick-camera">С камеры</button>
+      </div>
+      <input id="file-camera" type="file" accept="image/*" capture="environment" hidden />
       ${
         state.imageDataUrl
           ? `<img class="preview" alt="Превью" src="${state.imageDataUrl}" />`
@@ -286,6 +291,19 @@ function render() {
   app.querySelector('#file').addEventListener('change', (e) => {
     const file = e.target.files?.[0]
     onFile(file)
+  })
+
+  app.querySelector('#file-camera').addEventListener('change', (e) => {
+    const file = e.target.files?.[0]
+    onFile(file)
+  })
+
+  app.querySelector('#pick-gallery').addEventListener('click', () => {
+    app.querySelector('#file').click()
+  })
+
+  app.querySelector('#pick-camera').addEventListener('click', () => {
+    app.querySelector('#file-camera').click()
   })
 
   app.querySelector('#recognize').addEventListener('click', () => recognize())
