@@ -310,8 +310,8 @@ async function copyText() {
 function renderGate() {
   app.innerHTML = `
     <section class="card gate">
-      <h1>Расход ${GROUP_CODE}</h1>
-      <p class="sub">Доступ только по коду — чтобы API не жрали чужие</p>
+      <h1>Расход</h1>
+      <p class="sub">Доступ только по коду</p>
       <label>
         Код доступа
         <input id="access-code" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Введи код" />
@@ -348,7 +348,7 @@ function render() {
   app.innerHTML = `
     <div class="topbar">
       <div>
-        <h1>Расход ${GROUP_CODE}</h1>
+        <h1>Расход</h1>
         <p class="sub">Фото графика → правка → готовый текст в группу командиров</p>
       </div>
       <button type="button" class="ghost" id="logout">Выйти</button>
