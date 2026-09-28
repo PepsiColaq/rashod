@@ -17,11 +17,11 @@ export function buildRashodText(state) {
   const people = state.people || []
   const onList = people.length
 
-  const duty = people.filter((p) => !p.event && p.mark === 'duty')
-  const event = people.filter((p) => p.event)
+  const event = people.filter((p) => p.event || p.mark === 'event')
+  const duty = people.filter((p) => !(p.event || p.mark === 'event') && p.mark === 'duty')
   const absent = people.filter(
     (p) =>
-      !p.event &&
+      !(p.event || p.mark === 'event') &&
       p.mark !== 'duty' &&
       (p.mark === 'absent' ||
         p.mark === 'excused' ||

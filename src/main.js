@@ -215,6 +215,7 @@ async function recognize() {
       const key = String(raw ?? '')
         .trim()
         .toLowerCase()
+        .replaceAll('.', '')
       const map = {
         present: 'present',
         '+': 'present',
@@ -225,6 +226,11 @@ async function recognize() {
         duty: 'duty',
         н: 'duty',
         h: 'duty',
+        event: 'event',
+        мп: 'event',
+        mp: 'event',
+        ип: 'event',
+        'мероприятие': 'event',
         excused: 'excused',
         о: 'excused',
         sick: 'sick',
@@ -244,7 +250,7 @@ async function recognize() {
         fullName: r.fullName,
         mark,
         reason: '',
-        event: false,
+        event: mark === 'event' || !!hit.event,
         confidence: typeof hit?.confidence === 'number' ? hit.confidence : null,
         disagreed: !!hit.disagreed,
       }
@@ -514,7 +520,9 @@ function render() {
 
     el.querySelectorAll('[data-quick]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        state.people[i].mark = btn.getAttribute('data-quick')
+        const q = btn.getAttribute('data-quick')
+        state.people[i].mark = q
+        state.people[i].event = q === 'event'
         refreshOut()
       })
     })
@@ -522,8 +530,14 @@ function render() {
     el.querySelectorAll('[data-field]').forEach((input) => {
       const field = input.getAttribute('data-field')
       const handler = () => {
-        if (field === 'event') state.people[i].event = input.checked
-        else state.people[i][field] = input.value
+        if (field === 'event') {
+          state.people[i].event = input.checked
+          if (input.checked) state.people[i].mark = 'event'
+          else if (state.people[i].mark === 'event') state.people[i].mark = 'present'
+        } else {
+          state.people[i][field] = input.value
+          if (field === 'mark') state.people[i].event = input.value === 'event'
+        }
         refreshOut()
       }
       input.addEventListener('change', handler)

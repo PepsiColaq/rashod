@@ -30,6 +30,7 @@ export const MARKS = {
   present: { label: 'Есть (+)', short: '+' },
   absent: { label: 'Нет (−)', short: '−' },
   duty: { label: 'Наряд (Н)', short: 'Н' },
+  event: { label: 'Мероприятие (МП)', short: 'МП' },
   excused: { label: 'Отпущен (О)', short: 'О' },
   sick: { label: 'Болен (Б)', short: 'Б' },
   unknown: { label: 'Н/П', short: 'Н/П' },
@@ -38,5 +39,5 @@ export const MARKS = {
 }
 
 /** Быстрые кнопки в карточке курсанта */
-export const QUICK_MARKS = ['present', 'absent', 'duty']
+export const QUICK_MARKS = ['present', 'absent', 'duty', 'event']
 
