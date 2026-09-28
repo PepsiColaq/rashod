@@ -1,4 +1,4 @@
-import { GROUP_CODE, MARKS } from './data/roster.js'
+import { GROUP_CODE, MARKS } from '../data/roster.js'
 
 /**
  * @param {{
