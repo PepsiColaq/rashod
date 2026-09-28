@@ -117,7 +117,8 @@ async function recognize() {
 
     const data = await res.json().catch(() => ({}))
     if (!res.ok || !data.ok) {
-      throw new Error(data.error || `Ошибка API (${res.status})`)
+      const extra = data.detail ? ` (${typeof data.detail === 'string' ? data.detail : ''})` : ''
+      throw new Error((data.error || `Ошибка API (${res.status})`) + extra)
     }
 
     const students = data.result?.students || []

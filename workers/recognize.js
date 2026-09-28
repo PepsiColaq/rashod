@@ -1,9 +1,5 @@
 /**
  * Cloudflare Worker — распознавание расхода через Polza.ai (Gemini).
- *
- * Деплой:
- *   npx wrangler secret put POLZA_API_KEY --config workers/wrangler.toml
- *   npm run worker:deploy
  */
 
 const CORS = {
@@ -67,51 +63,81 @@ function json(data, status = 200) {
 }
 
 function buildPrompt({ day, group, roster }) {
-  const list = roster
-    .map((p, i) => `${i + 1}. ${p.fullName} | surname=${p.surname}`)
-    .join('\n')
+  const list = roster.map((p, i) => `${i + 1}. ${p.fullName}`).join('\n')
+  const n = roster.length
 
-  return `Ты OCR-парсер графика посещаемости курсантов (фото таблицы).
+  return `OCR графика посещаемости. Прочитай ТОЛЬКО столбец дня ${day}.
 
-Нужен ТОЛЬКО столбец с числом ${day} в шапке (дни 1–31). Остальные дни игнорируй.
+Легенда → mark:
++ = present
+- или жирный минус поверх плюса = absent
+Н = duty
+О = excused
+Б = sick
+Н/П = unknown
+С = unauthorized
+пусто = empty
 
-Легенда ячеек → значение mark (строго латиницей из списка):
-+ → present
-- или − (в т.ч. жирный минус поверх плюса) → absent
-Н (кириллица, похожа на H) → duty
-О → excused
-Б → sick
-Н/П → unknown
-С → unauthorized
-пустая ячейка → empty
-
-Правила:
-1) Смотри строку i списка = строка i на листе (сверху вниз, после шапки).
-2) В surname копируй фамилию РОВНО как в поле surname= из списка.
-3) mark — только: present, absent, duty, excused, sick, unknown, unauthorized, empty.
-4) Нельзя всем ставить empty, если в столбце дня ${day} видны плюсы/минусы.
-5) Если плюс зачёркнут жирным минусом — absent.
-
-Группа: ${group}
-Список (порядок строк):
+Строка 1 списка = первая ФИО на листе, и так далее.
+Группа ${group}. Список (${n} чел.):
 ${list}
 
-Ответ — один JSON без markdown:
-{"group":"${group}","day":${day},"students":[{"surname":"...","mark":"present","confidence":0.0}]}
-students.length = ${roster.length}, тот же порядок.`
+Верни ТОЛЬКО валидный JSON одной строкой, без markdown и без комментариев:
+{"day":${day},"marks":["present","absent","duty"]}
+
+В marks ровно ${n} строк, порядок как в списке выше. Только латиница из легенды.`
+}
+
+function repairJson(text) {
+  let s = String(text)
+    .replace(/```json\s*/gi, '')
+    .replace(/```/g, '')
+    .trim()
+  const start = s.indexOf('{')
+  const end = s.lastIndexOf('}')
+  if (start === -1 || end === -1) throw new Error('В ответе нет JSON')
+  s = s.slice(start, end + 1)
+  // trailing commas
+  s = s.replace(/,\s*([}\]])/g, '$1')
+  // smart quotes
+  s = s.replace(/[“”«»]/g, '"').replace(/[‘’]/g, "'")
+  return s
 }
 
 function extractJson(text) {
   if (!text) throw new Error('Пустой ответ модели')
-  const cleaned = String(text).replace(/```json\s*/gi, '').replace(/```/g, '').trim()
-  const start = cleaned.indexOf('{')
-  const end = cleaned.lastIndexOf('}')
-  if (start === -1 || end === -1) throw new Error('В ответе нет JSON')
-  return JSON.parse(cleaned.slice(start, end + 1))
+  const repaired = repairJson(text)
+  try {
+    return JSON.parse(repaired)
+  } catch (firstErr) {
+    // fallback: вытащить массив marks по regex
+    const marksMatch = repaired.match(/"marks"\s*:\s*\[([\s\S]*?)\]/)
+    if (marksMatch) {
+      const parts = marksMatch[1]
+        .split(',')
+        .map((x) => x.replace(/[^a-zA-Zа-яА-ЯёЁ+\-−/]/g, '').trim())
+        .filter(Boolean)
+      if (parts.length) {
+        return { marks: parts, day: null, _repaired: true }
+      }
+    }
+    // fallback: students objects
+    const objs = [...repaired.matchAll(/"mark"\s*:\s*"([^"]+)"/gi)].map((m) => ({
+      mark: m[1],
+    }))
+    if (objs.length) return { students: objs, _repaired: true }
+    throw firstErr
+  }
 }
 
 function normalizeResult(parsed, roster) {
-  const incoming = Array.isArray(parsed?.students) ? parsed.students : []
+  let incoming = []
+  if (Array.isArray(parsed?.marks)) {
+    incoming = parsed.marks.map((mark) => ({ mark }))
+  } else if (Array.isArray(parsed?.students)) {
+    incoming = parsed.students
+  }
+
   const bySurname = new Map()
   for (const s of incoming) {
     const key = String(s?.surname || '')
@@ -128,7 +154,7 @@ function normalizeResult(parsed, roster) {
         ? hit.confidence
         : mark === 'empty'
           ? 0.2
-          : 0.6
+          : 0.7
     return {
       surname: r.surname,
       mark,
@@ -142,6 +168,49 @@ function normalizeResult(parsed, roster) {
     day: parsed?.day ?? null,
     students,
   }
+}
+
+async function callPolza(env, { model, prompt, dataUrl }) {
+  const upstream = await fetch(POLZA_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.POLZA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      max_tokens: 2500,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            {
+              type: 'image_url',
+              image_url: { url: dataUrl, detail: 'high' },
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  const rawText = await upstream.text()
+  let upstreamJson
+  try {
+    upstreamJson = JSON.parse(rawText)
+  } catch {
+    throw new Error('Polza вернула не JSON: ' + rawText.slice(0, 200))
+  }
+  if (!upstream.ok) {
+    const msg = upstreamJson?.error?.message || upstreamJson?.message || 'Ошибка Polza'
+    const err = new Error(msg)
+    err.status = upstream.status
+    err.detail = upstreamJson
+    throw err
+  }
+  return upstreamJson
 }
 
 export default {
@@ -159,9 +228,8 @@ export default {
       return json({ error: 'Not found' }, 404)
     }
 
-    const apiKey = env.POLZA_API_KEY
-    if (!apiKey) {
-      return json({ error: 'POLZA_API_KEY не задан (wrangler secret put)' }, 500)
+    if (!env.POLZA_API_KEY) {
+      return json({ error: 'POLZA_API_KEY не задан' }, 500)
     }
 
     let body
@@ -188,52 +256,13 @@ export default {
     const model = env.MODEL || 'google/gemini-3.8-flash'
     const prompt = buildPrompt({ day: dayNum, group: group || '0903-ПД3', roster })
 
-    let upstream
-    try {
-      upstream = await fetch(POLZA_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          temperature: 0,
-          max_tokens: 5000,
-          response_format: { type: 'json_object' },
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: prompt },
-                {
-                  type: 'image_url',
-                  image_url: { url: dataUrl, detail: 'high' },
-                },
-              ],
-            },
-          ],
-        }),
-      })
-    } catch (err) {
-      return json({ error: 'Сеть: ' + (err.message || String(err)) }, 502)
-    }
-
-    const rawText = await upstream.text()
     let upstreamJson
     try {
-      upstreamJson = JSON.parse(rawText)
-    } catch {
-      return json({ error: 'Polza вернула не JSON', detail: rawText.slice(0, 500) }, 502)
-    }
-
-    if (!upstream.ok) {
+      upstreamJson = await callPolza(env, { model, prompt, dataUrl })
+    } catch (err) {
       return json(
-        {
-          error: upstreamJson?.error?.message || upstreamJson?.message || 'Ошибка Polza',
-          detail: upstreamJson,
-        },
-        upstream.status || 502,
+        { error: err.message || String(err), detail: err.detail || null },
+        err.status || 502,
       )
     }
 
@@ -251,7 +280,11 @@ export default {
       })
     } catch (err) {
       return json(
-        { error: err.message || 'Не разобрать ответ', raw: String(content).slice(0, 2000) },
+        {
+          error: 'Модель вернула битый ответ. Нажми «Распознать» ещё раз.',
+          detail: err.message || String(err),
+          raw: String(content || '').slice(0, 1500),
+        },
         502,
       )
     }
