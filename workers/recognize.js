@@ -2,10 +2,8 @@
  * Cloudflare Worker — распознавание расхода через Polza.ai (Gemini).
  *
  * Деплой:
- *   1. npx wrangler login
- *   2. npx wrangler secret put POLZA_API_KEY --config workers/wrangler.toml
- *   3. npm run worker:deploy
- *   4. URL вида https://rashod-api.XXXX.workers.dev → в .env.local как VITE_API_URL
+ *   npx wrangler secret put POLZA_API_KEY --config workers/wrangler.toml
+ *   npm run worker:deploy
  */
 
 const CORS = {
@@ -17,6 +15,50 @@ const CORS = {
 
 const POLZA_URL = 'https://polza.ai/api/v1/chat/completions'
 
+const MARK_ALIASES = {
+  present: 'present',
+  '+': 'present',
+  plus: 'present',
+  'плюс': 'present',
+  'на лицо': 'present',
+  налицо: 'present',
+  absent: 'absent',
+  '-': 'absent',
+  '−': 'absent',
+  '–': 'absent',
+  minus: 'absent',
+  'минус': 'absent',
+  'нет': 'absent',
+  'отсутствует': 'absent',
+  duty: 'duty',
+  н: 'duty',
+  h: 'duty',
+  'наряд': 'duty',
+  excused: 'excused',
+  о: 'excused',
+  'отпущен': 'excused',
+  sick: 'sick',
+  б: 'sick',
+  'болен': 'sick',
+  unknown: 'unknown',
+  'н/п': 'unknown',
+  нп: 'unknown',
+  unauthorized: 'unauthorized',
+  с: 'unauthorized',
+  'самоволка': 'unauthorized',
+  empty: 'empty',
+  '': 'empty',
+  null: 'empty',
+}
+
+function normalizeMark(raw) {
+  const key = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+  return MARK_ALIASES[key] || MARK_ALIASES[key.replaceAll(' ', '')] || null
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -26,51 +68,80 @@ function json(data, status = 200) {
 
 function buildPrompt({ day, group, roster }) {
   const list = roster
-    .map((p, i) => `${i + 1}. ${p.fullName} (фамилия: ${p.surname})`)
+    .map((p, i) => `${i + 1}. ${p.fullName} | surname=${p.surname}`)
     .join('\n')
 
-  return `Ты разбираешь фото «График посещаемости» курсантов.
+  return `Ты OCR-парсер графика посещаемости курсантов (фото таблицы).
 
-Задача: прочитать ТОЛЬКО столбец дня ${day} (число месяца в шапке таблицы 1–31).
+Нужен ТОЛЬКО столбец с числом ${day} в шапке (дни 1–31). Остальные дни игнорируй.
 
-Легенда бланка:
-- «+» = present (на лицо)
-- «−» / «-» = absent (отсутствует)
-- «Н» = duty (наряд)
-- «О» = excused (отпущен)
-- «Б» = sick (болен)
-- «Н/П» = unknown
-- «С» = unauthorized (самовольный уход)
-- пустая ячейка (выходной/нет отметки) = empty
+Легенда ячеек → значение mark (строго латиницей из списка):
++ → present
+- или − (в т.ч. жирный минус поверх плюса) → absent
+Н (кириллица, похожа на H) → duty
+О → excused
+Б → sick
+Н/П → unknown
+С → unauthorized
+пустая ячейка → empty
 
-Важно про исправления:
-- если поверх «+» жирно перечёркнуто или написан более жирный «−» — это absent;
-- не путай «Н» (кириллическая) с плюсом.
+Правила:
+1) Смотри строку i списка = строка i на листе (сверху вниз, после шапки).
+2) В surname копируй фамилию РОВНО как в поле surname= из списка.
+3) mark — только: present, absent, duty, excused, sick, unknown, unauthorized, empty.
+4) Нельзя всем ставить empty, если в столбце дня ${day} видны плюсы/минусы.
+5) Если плюс зачёркнут жирным минусом — absent.
 
-Группа по умолчанию: ${group}.
-Список курсантов (сопоставляй по порядку строк и ФИО на листе):
+Группа: ${group}
+Список (порядок строк):
 ${list}
 
-Верни СТРОГО один JSON без markdown:
-{
-  "group": "${group}",
-  "day": ${day},
-  "students": [
-    { "surname": "Фамилия", "mark": "present|absent|duty|excused|sick|unknown|unauthorized|empty", "confidence": 0.0 }
-  ]
-}
-
-students — ровно по одному на каждого из списка выше, в том же порядке.
-confidence от 0 до 1.`
+Ответ — один JSON без markdown:
+{"group":"${group}","day":${day},"students":[{"surname":"...","mark":"present","confidence":0.0}]}
+students.length = ${roster.length}, тот же порядок.`
 }
 
 function extractJson(text) {
   if (!text) throw new Error('Пустой ответ модели')
-  const cleaned = text.replace(/```json\s*/gi, '').replace(/```/g, '').trim()
+  const cleaned = String(text).replace(/```json\s*/gi, '').replace(/```/g, '').trim()
   const start = cleaned.indexOf('{')
   const end = cleaned.lastIndexOf('}')
   if (start === -1 || end === -1) throw new Error('В ответе нет JSON')
   return JSON.parse(cleaned.slice(start, end + 1))
+}
+
+function normalizeResult(parsed, roster) {
+  const incoming = Array.isArray(parsed?.students) ? parsed.students : []
+  const bySurname = new Map()
+  for (const s of incoming) {
+    const key = String(s?.surname || '')
+      .trim()
+      .toLowerCase()
+    if (key) bySurname.set(key, s)
+  }
+
+  const students = roster.map((r, i) => {
+    const hit = bySurname.get(String(r.surname).toLowerCase()) || incoming[i] || {}
+    const mark = normalizeMark(hit.mark) || 'empty'
+    const confidence =
+      typeof hit.confidence === 'number'
+        ? hit.confidence
+        : mark === 'empty'
+          ? 0.2
+          : 0.6
+    return {
+      surname: r.surname,
+      mark,
+      confidence,
+      rawMark: hit.mark ?? null,
+    }
+  })
+
+  return {
+    group: parsed?.group || null,
+    day: parsed?.day ?? null,
+    students,
+  }
 }
 
 export default {
@@ -127,8 +198,8 @@ export default {
         },
         body: JSON.stringify({
           model,
-          temperature: 0.1,
-          max_tokens: 4000,
+          temperature: 0,
+          max_tokens: 5000,
           response_format: { type: 'json_object' },
           messages: [
             {
@@ -169,11 +240,14 @@ export default {
     const content = upstreamJson?.choices?.[0]?.message?.content
     try {
       const parsed = extractJson(content)
+      const result = normalizeResult(parsed, roster)
+      const filled = result.students.filter((s) => s.mark !== 'empty').length
       return json({
         ok: true,
         model,
         usage: upstreamJson.usage || null,
-        result: parsed,
+        filled,
+        result,
       })
     } catch (err) {
       return json(

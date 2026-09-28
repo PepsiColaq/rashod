@@ -33,7 +33,7 @@ function fileToDataUrl(file) {
 }
 
 /** Сжимаем фото перед отправкой — дешевле и быстрее для vision */
-async function compressImage(file, maxSide = 2000, quality = 0.82) {
+async function compressImage(file, maxSide = 2800, quality = 0.92) {
   const dataUrl = await fileToDataUrl(file)
   const img = await new Promise((resolve, reject) => {
     const el = new Image()
@@ -120,13 +120,39 @@ async function recognize() {
       throw new Error(data.error || `Ошибка API (${res.status})`)
     }
 
+    const students = data.result?.students || []
     const bySurname = new Map(
-      (data.result?.students || []).map((s) => [String(s.surname || '').toLowerCase(), s]),
+      students.map((s) => [String(s.surname || '').trim().toLowerCase(), s]),
     )
 
-    state.people = ROSTER.map((r) => {
-      const hit = bySurname.get(r.surname.toLowerCase())
-      const mark = hit?.mark && MARKS[hit.mark] ? hit.mark : 'empty'
+    const normalizeClient = (raw) => {
+      const key = String(raw ?? '')
+        .trim()
+        .toLowerCase()
+      const map = {
+        present: 'present',
+        '+': 'present',
+        plus: 'present',
+        absent: 'absent',
+        '-': 'absent',
+        '−': 'absent',
+        duty: 'duty',
+        н: 'duty',
+        h: 'duty',
+        excused: 'excused',
+        о: 'excused',
+        sick: 'sick',
+        б: 'sick',
+        unknown: 'unknown',
+        unauthorized: 'unauthorized',
+        empty: 'empty',
+      }
+      return map[key] || (MARKS[key] ? key : null)
+    }
+
+    state.people = ROSTER.map((r, i) => {
+      const hit = bySurname.get(r.surname.toLowerCase()) || students[i] || {}
+      const mark = normalizeClient(hit.mark) || (MARKS[hit.mark] ? hit.mark : 'empty')
       return {
         surname: r.surname,
         fullName: r.fullName,
@@ -138,12 +164,26 @@ async function recognize() {
     })
 
     state.usage = data.usage || null
+    const presentN = state.people.filter((p) => p.mark === 'present').length
+    const absentN = state.people.filter((p) =>
+      ['absent', 'excused', 'sick', 'unknown', 'unauthorized'].includes(p.mark),
+    ).length
+    const dutyN = state.people.filter((p) => p.mark === 'duty').length
+    const emptyN = state.people.filter((p) => p.mark === 'empty').length
     const cost = data.usage?.cost_rub ?? data.usage?.cost
-    setStatus(
-      cost != null
-        ? `Готово. Проверь отметки и допиши причины. (~${Number(cost).toFixed(2)} ₽)`
-        : 'Готово. Проверь отметки и допиши причины.',
-    )
+
+    if (emptyN === state.people.length) {
+      setStatus(
+        'Модель не прочитала отметки (все пусто). Проверь дату столбца и попробуй более ровное фото.',
+        true,
+      )
+    } else {
+      setStatus(
+        `Готово: +${presentN}, нет ${absentN}, наряд ${dutyN}${emptyN ? `, пусто ${emptyN}` : ''}${
+          cost != null ? ` (~${Number(cost).toFixed(2)} ₽)` : ''
+        }. Проверь и допиши причины.`,
+      )
+    }
   } catch (err) {
     setStatus(err.message || String(err), true)
   } finally {
