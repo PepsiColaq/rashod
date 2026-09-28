@@ -12,6 +12,7 @@ const CORS = {
 
 const POLZA_URL = 'https://polza.ai/api/v1/chat/completions'
 const DEFAULT_MODEL = 'google/gemini-2.5-pro'
+const DEFAULT_VERIFY_MODEL = 'google/gemini-2.5-pro'
 
 const MARK_ALIASES = {
   present: 'present',
@@ -265,9 +266,10 @@ export default {
 
     const url = new URL(request.url)
     const model = env.MODEL || DEFAULT_MODEL
+    const verifyModel = env.VERIFY_MODEL || DEFAULT_VERIFY_MODEL
 
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
-      return json({ ok: true, model })
+      return json({ ok: true, model, verifyModel })
     }
 
     if (request.method === 'POST' && url.pathname.endsWith('/auth')) {
@@ -330,7 +332,7 @@ export default {
       )
 
       const verifyUp = await callPolza(env, {
-        model,
+        model: verifyModel,
         prompt: buildVerifyPrompt({ day: dayNum, roster, firstMarks }),
         dataUrl,
       })
@@ -348,6 +350,7 @@ export default {
       return json({
         ok: true,
         model,
+        verifyModel,
         verified: true,
         disagreed,
         usage,

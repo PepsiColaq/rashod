@@ -177,7 +177,7 @@ async function recognize() {
   }
 
   state.busy = true
-  setStatus('Распознаю и перепроверяю столбец (Pro, 2 прохода)…')
+  setStatus('Распознаю и перепроверяю столбец (2× Pro)…')
 
   try {
     const res = await fetch(recognizeUrl(), {
@@ -267,7 +267,7 @@ async function recognize() {
       )
     } else {
       const bits = [
-        `Готово (2 прохода Pro)`,
+        `Готово (2× Pro)`,
         `+${presentN}`,
         `нет ${absentN}`,
         `наряд ${dutyN}`,
