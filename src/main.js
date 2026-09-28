@@ -32,8 +32,8 @@ function fileToDataUrl(file) {
   })
 }
 
-/** Сжимаем фото перед отправкой — дешевле и быстрее для vision */
-async function compressImage(file, maxSide = 2800, quality = 0.92) {
+/** Сжимаем фото + кроп правой части (дни), чтобы ИИ лучше читал столбец */
+async function prepareImages(file, maxSide = 3000, quality = 0.92) {
   const dataUrl = await fileToDataUrl(file)
   const img = await new Promise((resolve, reject) => {
     const el = new Image()
@@ -45,12 +45,23 @@ async function compressImage(file, maxSide = 2800, quality = 0.92) {
   const scale = Math.min(1, maxSide / Math.max(img.width, img.height))
   const w = Math.round(img.width * scale)
   const h = Math.round(img.height * scale)
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d')
-  ctx.drawImage(img, 0, 0, w, h)
-  return canvas.toDataURL('image/jpeg', quality)
+
+  const full = document.createElement('canvas')
+  full.width = w
+  full.height = h
+  full.getContext('2d').drawImage(img, 0, 0, w, h)
+
+  // правые ~58% листа — зона дней + часть ФИО для привязки рядов
+  const cropX = Math.floor(w * 0.35)
+  const crop = document.createElement('canvas')
+  crop.width = w - cropX
+  crop.height = h
+  crop.getContext('2d').drawImage(full, cropX, 0, w - cropX, h, 0, 0, w - cropX, h)
+
+  return {
+    full: full.toDataURL('image/jpeg', quality),
+    crop: crop.toDataURL('image/jpeg', quality),
+  }
 }
 
 function defaultPeople() {
@@ -90,6 +101,7 @@ const state = {
   authError: '',
   date: todayIso(),
   imageDataUrl: '',
+  imageCropDataUrl: '',
   people: defaultPeople(),
   busy: false,
   message: '',
@@ -177,7 +189,7 @@ async function recognize() {
   }
 
   state.busy = true
-  setStatus('Распознаю и перепроверяю столбец (2× Pro)…')
+  setStatus('Распознаю по частям + проверка (Pro)…')
 
   try {
     const res = await fetch(recognizeUrl(), {
@@ -188,6 +200,7 @@ async function recognize() {
       },
       body: JSON.stringify({
         imageBase64: state.imageDataUrl,
+        imageCropBase64: state.imageCropDataUrl || undefined,
         mimeType: 'image/jpeg',
         day,
         group: GROUP_CODE,
@@ -296,7 +309,9 @@ async function onFile(file) {
   try {
     state.busy = true
     setStatus('Готовлю фото…')
-    state.imageDataUrl = await compressImage(file)
+    const prepared = await prepareImages(file)
+    state.imageDataUrl = prepared.full
+    state.imageCropDataUrl = prepared.crop
     setStatus('Фото готово — нажми «Распознать»')
   } catch (err) {
     setStatus(err.message || String(err), true)

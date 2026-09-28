@@ -4,6 +4,12 @@ import re
 import urllib.request
 from pathlib import Path
 
+try:
+    from PIL import Image
+    import io
+except ImportError:
+    Image = None
+
 root = Path(r"D:\чистилка\rashod")
 text = (root / "src/data/roster.js").read_text(encoding="utf-8")
 surnames = re.findall(r"surname: '([^']+)'", text)
@@ -17,25 +23,30 @@ EXPECTED = {
 }
 
 img = Path(
-    r"C:\Users\pishi\.cursor\projects\d-rashod\assets\c__Users_pishi_AppData_Roaming_Cursor_User_workspaceStorage_0c85b491aceb97e72279e9e01ac11e5e_images_image-72b171aa-65c0-4829-9fd2-92e0bfa28965.jpg"
+    r"C:\Users\pishi\.cursor\projects\d-rashod\assets\c__Users_pishi_AppData_Roaming_Cursor_User_workspaceStorage_0c85b491aceb97e72279e9e01ac11e5e_images_image-eaa5e43e-8555-42eb-9d23-a6e3f151fc7c.jpg"
 )
-# fallback older photo
-if not img.exists():
-    img = Path(
-        r"C:\Users\pishi\.cursor\projects\d-rashod\assets\c__Users_pishi_AppData_Roaming_Cursor_User_workspaceStorage_0c85b491aceb97e72279e9e01ac11e5e_images_image-7f3a52d3-0c11-4a4d-abf5-055a7e273826.jpg"
-    )
+raw = img.read_bytes()
+b64 = base64.standard_b64encode(raw).decode()
+crop_b64 = None
+if Image:
+    im = Image.open(io.BytesIO(raw)).convert("RGB")
+    w, h = im.size
+    crop = im.crop((int(w * 0.35), 0, w, h))
+    buf = io.BytesIO()
+    crop.save(buf, format="JPEG", quality=92)
+    crop_b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
-b64 = base64.standard_b64encode(img.read_bytes()).decode()
-body = json.dumps(
-    {
-        "imageBase64": "data:image/jpeg;base64," + b64,
-        "day": 28,
-        "group": "0903-ПД3",
-        "roster": roster,
-        "accessCode": "91271732100",
-    },
-    ensure_ascii=False,
-).encode("utf-8")
+payload = {
+    "imageBase64": "data:image/jpeg;base64," + b64,
+    "day": 28,
+    "group": "0903-ПД3",
+    "roster": roster,
+    "accessCode": "91271732100",
+}
+if crop_b64:
+    payload["imageCropBase64"] = "data:image/jpeg;base64," + crop_b64
+
+body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 req = urllib.request.Request(
     "https://rashod-api.voyc-nikita.workers.dev/recognize",
     data=body,
@@ -46,19 +57,14 @@ req = urllib.request.Request(
         "X-Access-Code": "91271732100",
     },
 )
-with urllib.request.urlopen(req, timeout=300) as r:
+with urllib.request.urlopen(req, timeout=400) as r:
     data = json.loads(r.read().decode("utf-8"))
 
-out = Path(r"C:\Users\pishi\AppData\Local\Temp\rashod-test.json")
+out = Path(os_path := __import__("os").environ["TEMP"]) / "rashod-test.json"
 out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 students = (data.get("result") or {}).get("students") or []
 print("ok", data.get("ok"), "mode", data.get("mode"), "cost", (data.get("usage") or {}).get("cost_rub"))
-print("exceptionsCount", data.get("exceptionsCount"))
-print("--- specials ---")
-for s in students:
-    if s.get("mark") != "present":
-        print(f"{s.get('surname')}\t{s.get('mark')}")
-print("--- check expected ---")
+print("glyphs", json.dumps(data.get("glyphs"), ensure_ascii=True))
 by = {s["surname"]: s["mark"] for s in students}
 ok_all = True
 for name, mark in EXPECTED.items():
@@ -67,7 +73,6 @@ for name, mark in EXPECTED.items():
     if got != mark:
         ok_all = False
     print(f"{flag}\t{name}: want={mark} got={got}")
-# everyone else present?
 for s in students:
     if s["surname"] in EXPECTED:
         continue

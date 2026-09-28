@@ -73,53 +73,123 @@ function json(data, status = 200) {
   })
 }
 
-function buildExceptionsPrompt({ day, group, roster }) {
-  const list = roster.map((p, i) => `${i + 1}. ${p.fullName}`).join('\n')
-  const n = roster.length
+function buildGlyphsChunkPrompt({ day, group, roster, start, end }) {
+  // start/end — индексы 0-based, end exclusive
+  const slice = roster.slice(start, end)
+  const list = slice.map((p, i) => `${start + i + 1}. ${p.fullName}`).join('\n')
+  const n = slice.length
 
-  return `OCR графика посещаемости. Группа ${group}.
+  return `OCR фрагмента. Группа ${group}. Столбец дня ${day} только.
 
-Большинство клеток в столбце дня ${day} — это «+» (человек есть).
-Твоя задача: найти ВСЕ исключения в столбце ${day}, где знак НЕ плюс.
+Прочитай знаки ТОЛЬКО для строк №${start + 1}–${start + n} (подряд, без пропусков и сдвигов).
 
-Легенда исключений:
-- или − = absent (нету)
-Н (одна буква как H) = duty (наряд)
-мп / МП / м.п. (две буквы; иногда криво как «ип») = event (мероприятие)
-О = excused, Б = sick, Н/П = unknown, С = unauthorized
+Легенда glyph:
+"+" есть
+"-" нету  
+"Н" наряд (одна буква)
+"мп" мероприятие (две буквы; не путай с Н)
+"О" "Б" "Н/П" "С" или "+"
 
-Правила:
-1) Смотри ТОЛЬКО столбец с числом ${day} в шапке.
-2) Номер строки = колонка № на листе = номер в списке ниже (без сдвига).
-3) Не путай Н и мп.
-4) Не включай тех, у кого обычный +.
+Метод: для каждого номера найди ряд слева с этим №, веди взгляд вправо в столбец ${day}.
 
-Список (${n} чел.):
+Строки:
 ${list}
 
 JSON:
-{"day":${day},"exceptions":[{"n":2,"surname":"Брюкин","glyph":"-","mark":"absent"}]}
-
-n — номер с 1. Если исключений нет — {"day":${day},"exceptions":[]}.`
+{"from":${start + 1},"to":${start + n},"glyphs":[${Array(n).fill('\"+\"').join(',')}]}
+glyphs.length строго ${n}. glyphs[0] = знак строки №${start + 1}.`
 }
 
-function buildConfirmExceptionsPrompt({ day, roster, exceptions }) {
-  const lines = (exceptions || [])
-    .map((e) => `n=${e.n}, ${roster[(e.n || 1) - 1]?.fullName || e.surname}, glyph=${e.glyph || '?'}, mark=${e.mark}`)
+function buildConfirmSpecialsPrompt({ day, roster, glyphs }) {
+  const specials = []
+  glyphs.forEach((g, i) => {
+    const mark = normalizeMark(g) || (g === '+' ? 'present' : 'present')
+    if (mark !== 'present' && String(g).trim() !== '+' && String(g).trim() !== '') {
+      specials.push(`${i + 1}. ${roster[i].fullName} → glyph="${g}"`)
+    }
+  })
+  // всегда дополнительно просим проверить «опасные» ряды 2,9,12
+  const must = [2, 9, 12]
+    .filter((n) => n <= roster.length)
+    .map((n) => `${n}. ${roster[n - 1].fullName} (сейчас "${glyphs[n - 1] || '?'}")`)
     .join('\n')
 
-  return `Подтверди исключения столбца дня ${day}.
+  return `Финальная проверка столбца ${day}.
 
-Черновик исключений (все остальные на листе = +):
-${lines || '(пусто)'}
+Сейчас как non-plus:
+${specials.length ? specials.join('\n') : '(нет)'}
 
-Для КАЖДОГО пункта: верно ли, что в клетке дня ${day} у этой строки именно такой знак?
-Также: не пропущен ли кто-то ещё с − / Н / мп?
+Обязательно перепроверь эти ряды (часто ошибаются):
+${must}
 
-JSON:
-{"exceptions":[{"n":2,"surname":"Брюкин","glyph":"-","mark":"absent"}],"ok":true}
+Верни ПОЛНЫЙ массив glyphs длины ${roster.length} с исправлениями:
+{"glyphs":[...]}`
+}
 
-Верни полный итоговый список exceptions (исправленный). ok=true если черновик был верным.`
+function marksFromGlyphs(glyphs, rosterLen) {
+  const out = []
+  for (let i = 0; i < rosterLen; i++) {
+    const g = glyphs[i]
+    const mark = normalizeMark(g) || (String(g || '').trim() === '+' ? 'present' : null) || 'empty'
+    // сырой + 
+    const finalMark =
+      mark === 'empty' && String(g || '').trim() === '+'
+        ? 'present'
+        : mark === 'empty' && !String(g || '').trim()
+          ? 'present' // пусто в учебный день чаще = не заполнено, но для расхода считаем как есть? User said others are +. Empty -> present for typical sheet
+          : mark === 'empty'
+            ? 'present'
+            : mark
+    out.push({
+      mark: finalMark === 'empty' ? 'present' : finalMark,
+      confidence: 0.88,
+      disagreed: false,
+      firstMark: finalMark,
+      glyph: g ?? null,
+    })
+  }
+  return out
+}
+
+function glyphsFromParsed(parsed, rosterLen) {
+  if (!Array.isArray(parsed?.glyphs)) return null
+  const g = parsed.glyphs.map((x) => String(x ?? '').trim())
+  if (g.length === rosterLen) return g
+  if (g.length > rosterLen) return g.slice(0, rosterLen)
+  // pad
+  while (g.length < rosterLen) g.push('+')
+  return g
+}
+
+function resolveExceptionIndex(roster, ex) {
+  const sn = String(ex?.surname || '')
+    .trim()
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+
+  let byName = -1
+  if (sn) {
+    byName = roster.findIndex((r) => r.surname.toLowerCase().replace(/ё/g, 'е') === sn)
+    if (byName < 0) {
+      byName = roster.findIndex((r) => {
+        const full = r.fullName.toLowerCase().replace(/ё/g, 'е')
+        const sur = r.surname.toLowerCase().replace(/ё/g, 'е')
+        return full.startsWith(sn) || sn.startsWith(sur)
+      })
+    }
+  }
+
+  const i = Number(ex?.n) - 1
+  const nOk = Number.isInteger(i) && i >= 0 && i < roster.length
+
+  // Приоритет номера строки на листе: знак читаем по горизонтали ряда,
+  // фамилии модель часто путает.
+  if (nOk) {
+    const disagreed = byName >= 0 && byName !== i
+    return { index: i, disagreed }
+  }
+  if (byName >= 0) return { index: byName, disagreed: false }
+  return { index: -1, disagreed: false }
 }
 
 function marksFromExceptions(roster, exceptions) {
@@ -127,22 +197,14 @@ function marksFromExceptions(roster, exceptions) {
   const meta = roster.map(() => ({ confidence: 0.85, disagreed: false, firstMark: 'present' }))
 
   for (const ex of exceptions || []) {
-    let i = Number(ex?.n) - 1
-    if (!Number.isInteger(i) || i < 0 || i >= roster.length) {
-      const sn = String(ex?.surname || '')
-        .trim()
-        .toLowerCase()
-      if (sn) {
-        i = roster.findIndex((r) => r.surname.toLowerCase() === sn)
-      }
-    }
-    if (i < 0 || i >= roster.length) continue
+    const { index: i, disagreed } = resolveExceptionIndex(roster, ex)
+    if (i < 0) continue
     const mark = normalizeMark(ex.mark) || normalizeMark(ex.glyph) || 'empty'
     if (mark === 'present' || mark === 'empty') continue
     marks[i] = mark
     meta[i] = {
-      confidence: 0.9,
-      disagreed: false,
+      confidence: disagreed ? 0.6 : 0.9,
+      disagreed,
       firstMark: mark,
       glyph: ex.glyph || null,
     }
@@ -244,7 +306,15 @@ function sumUsage(a, b) {
   }
 }
 
-async function callPolza(env, { model, prompt, dataUrl }) {
+async function callPolza(env, { model, prompt, images }) {
+  const content = [{ type: 'text', text: prompt }]
+  for (const url of images) {
+    if (!url) continue
+    content.push({
+      type: 'image_url',
+      image_url: { url, detail: 'high' },
+    })
+  }
   const upstream = await fetch(POLZA_URL, {
     method: 'POST',
     headers: {
@@ -256,18 +326,7 @@ async function callPolza(env, { model, prompt, dataUrl }) {
       temperature: 0,
       max_tokens: 3000,
       response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            {
-              type: 'image_url',
-              image_url: { url: dataUrl, detail: 'high' },
-            },
-          ],
-        },
-      ],
+      messages: [{ role: 'user', content }],
     }),
   })
   const rawText = await upstream.text()
@@ -341,7 +400,8 @@ export default {
       return json({ error: 'Нужен код доступа' }, 401)
     }
 
-    const { imageBase64, mimeType = 'image/jpeg', day, group, roster } = body || {}
+    const { imageBase64, imageCropBase64, mimeType = 'image/jpeg', day, group, roster } =
+      body || {}
     if (!imageBase64 || !day || !Array.isArray(roster) || !roster.length) {
       return json({ error: 'Нужны imageBase64, day и roster' }, 400)
     }
@@ -351,59 +411,72 @@ export default {
       return json({ error: 'day должен быть 1–31' }, 400)
     }
 
-    const dataUrl = String(imageBase64).startsWith('data:')
-      ? imageBase64
-      : `data:${mimeType};base64,${imageBase64}`
+    const toDataUrl = (raw) =>
+      String(raw).startsWith('data:') ? raw : `data:${mimeType};base64,${raw}`
+
+    const dataUrl = toDataUrl(imageBase64)
+    const cropUrl = imageCropBase64 ? toDataUrl(imageCropBase64) : null
+    const images = cropUrl ? [dataUrl, cropUrl] : [dataUrl]
 
     const g = group || '0903-ПД3'
 
     try {
-      // Проход 1: только исключения (не +) — точнее для типичного расхода
-      const firstUp = await callPolza(env, {
-        model,
-        prompt: buildExceptionsPrompt({ day: dayNum, group: g, roster }),
-        dataUrl,
-      })
-      const firstParsed = extractJson(firstUp?.choices?.[0]?.message?.content)
-      let exceptions = exceptionsFromParsed(firstParsed) || []
+      const chunks = [
+        [0, 7],
+        [7, 14],
+        [14, roster.length],
+      ]
+      let glyphs = []
+      let usageAcc = null
 
-      // Проход 2: подтвердить/дополнить список исключений
+      for (const [start, end] of chunks) {
+        const up = await callPolza(env, {
+          model,
+          prompt:
+            buildGlyphsChunkPrompt({ day: dayNum, group: g, roster, start, end }) +
+            (cropUrl
+              ? '\n\nВторое фото — увеличенный правый край листа (дни). Ориентируйся по нему для знаков.'
+              : ''),
+          images,
+        })
+        usageAcc = sumUsage(usageAcc, up.usage)
+        const parsed = extractJson(up?.choices?.[0]?.message?.content)
+        const part = glyphsFromParsed(parsed, end - start)
+        if (!part) {
+          throw new Error(`Не разобрать glyphs для строк ${start + 1}–${end}`)
+        }
+        glyphs = glyphs.concat(part)
+      }
+
+      if (glyphs.length !== roster.length) {
+        while (glyphs.length < roster.length) glyphs.push('+')
+        glyphs = glyphs.slice(0, roster.length)
+      }
+
       const verifyUp = await callPolza(env, {
         model: verifyModel,
-        prompt: buildConfirmExceptionsPrompt({ day: dayNum, roster, exceptions }),
-        dataUrl,
+        prompt:
+          buildConfirmSpecialsPrompt({ day: dayNum, roster, glyphs }) +
+          (cropUrl ? '\nВторое фото — кроп дней, сверь спорные клетки по нему.' : ''),
+        images,
       })
+      usageAcc = sumUsage(usageAcc, verifyUp.usage)
       const verifyParsed = extractJson(verifyUp?.choices?.[0]?.message?.content)
-      const confirmed = exceptionsFromParsed(verifyParsed)
-      if (Array.isArray(confirmed)) exceptions = confirmed
+      const glyphs2 = glyphsFromParsed(verifyParsed, roster.length)
+      const before = glyphs.slice()
+      if (glyphs2) glyphs = glyphs2
 
-      // Fallback: если модель вернула полный marks вместо exceptions
-      let merged
-      if (
-        (!exceptions.length &&
-          (Array.isArray(firstParsed?.marks) || Array.isArray(verifyParsed?.marks))) ||
-        (!exceptions.length && Array.isArray(verifyParsed?.students))
-      ) {
-        const marks = marksFromParsed(
-          Array.isArray(verifyParsed?.marks) || Array.isArray(verifyParsed?.students)
-            ? verifyParsed
-            : firstParsed,
-          roster.length,
-        )
-        merged = marks.map((mark) => ({
-          mark,
-          confidence: 0.7,
-          disagreed: false,
-          firstMark: mark,
-        }))
-      } else {
-        merged = marksFromExceptions(roster, exceptions)
+      const merged = marksFromGlyphs(glyphs, roster.length)
+      for (let i = 0; i < merged.length; i++) {
+        if (String(before[i] || '') !== String(glyphs[i] || '')) {
+          merged[i].disagreed = true
+          merged[i].confidence = 0.6
+        }
       }
 
       const result = normalizeResult(merged, roster, dayNum)
       const filled = result.students.filter((s) => s.mark !== 'empty').length
       const disagreed = result.students.filter((s) => s.disagreed).length
-      const usage = sumUsage(firstUp.usage, verifyUp.usage)
       const specials = result.students.filter((s) => s.mark !== 'present').length
 
       return json({
@@ -411,11 +484,11 @@ export default {
         model,
         verifyModel,
         verified: true,
-        mode: 'exceptions',
-        exceptionsCount: exceptions.length,
+        mode: 'glyphs-chunked',
+        glyphs,
         specials,
         disagreed,
-        usage,
+        usage: usageAcc,
         filled,
         result,
       })
