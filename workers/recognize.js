@@ -73,115 +73,100 @@ function json(data, status = 200) {
   })
 }
 
-function buildPrompt({ day, group, roster }) {
+function buildExceptionsPrompt({ day, group, roster }) {
   const list = roster.map((p, i) => `${i + 1}. ${p.fullName}`).join('\n')
   const n = roster.length
 
-  return `Ты внимательный OCR табличного графика посещаемости.
+  return `OCR графика посещаемости. Группа ${group}.
 
-Шаг 1: найди в ШАПКЕ таблицы число ${day}. Читай ТОЛЬКО этот столбец.
-Соседние дни (${Math.max(1, day - 1)}, ${Math.min(31, day + 1)}) ИГНОРИРУЙ.
+Большинство клеток в столбце дня ${day} — это «+» (человек есть).
+Твоя задача: найти ВСЕ исключения в столбце ${day}, где знак НЕ плюс.
 
-Шаг 2: сопоставь по НОМЕРУ строки (колонка №):
-строка 1 списка = №1 на листе, строка 2 = №2, ... без сдвига вверх/вниз.
-
-Легенда mark (латиница в JSON):
-+ = present
-− / - (только горизонталь) = absent
-Н (одна буква, как H, наряд) = duty
-мп / МП / м.п. (две буквы, мероприятие; иногда похоже на «ип») = event
+Легенда исключений:
+- или − = absent (нету)
+Н (одна буква как H) = duty (наряд)
+мп / МП / м.п. (две буквы; иногда криво как «ип») = event (мероприятие)
 О = excused, Б = sick, Н/П = unknown, С = unauthorized
-пусто = empty
 
-КРИТИЧНО — не путай:
-- Н (наряд) ≠ мп (мероприятие). мп = две буквы подряд.
-- Н у строки i не переноси на строку i±1.
-- + имеет вертикальную черту; − — нет.
-- Жирный − поверх + → absent.
+Правила:
+1) Смотри ТОЛЬКО столбец с числом ${day} в шапке.
+2) Номер строки = колонка № на листе = номер в списке ниже (без сдвига).
+3) Не путай Н и мп.
+4) Не включай тех, у кого обычный +.
 
-Группа ${group}. Список ровно ${n} чел. (порядок = № на листе):
+Список (${n} чел.):
 ${list}
 
-JSON без markdown:
-{"day":${day},"marks":["present","absent","duty","event",...],"glyphs":["+","-","Н","мп",...]}
-marks.length = ${n}, glyphs.length = ${n}.
-glyphs — что реально видно в клетке (сырой символ), marks — нормализованный код.`
+JSON:
+{"day":${day},"exceptions":[{"n":2,"surname":"Брюкин","glyph":"-","mark":"absent"}]}
+
+n — номер с 1. Если исключений нет — {"day":${day},"exceptions":[]}.`
 }
 
-function buildVerifyPrompt({ day, roster, firstMarks }) {
-  const suspect = []
-  const presentish = []
-  firstMarks.forEach((m, i) => {
-    const line = `${i + 1}. ${roster[i].fullName} (сейчас: ${m})`
-    if (m !== 'present') suspect.push(line)
-    else presentish.push(line)
-  })
+function buildConfirmExceptionsPrompt({ day, roster, exceptions }) {
+  const lines = (exceptions || [])
+    .map((e) => `n=${e.n}, ${roster[(e.n || 1) - 1]?.fullName || e.surname}, glyph=${e.glyph || '?'}, mark=${e.mark}`)
+    .join('\n')
 
-  return `ПЕРЕПРОВЕРКА столбца дня ${day}. Не переписывай весь список — только ошибки.
+  return `Подтверди исключения столбца дня ${day}.
 
-Особо проверь:
-- duty (Н) стоит у правильной фамилии (часто путают соседние строки);
-- event (мп/МП) не пропущен и не назван duty;
-- absent: есть ли минус у тех, кто marked present (и наоборот).
+Черновик исключений (все остальные на листе = +):
+${lines || '(пусто)'}
 
-Сейчас НЕ present:
-${suspect.length ? suspect.join('\n') : '(никого)'}
-
-Present (ищи пропуски − / Н / мп), строки 1–14:
-${presentish.slice(0, 14).join('\n')}
+Для КАЖДОГО пункта: верно ли, что в клетке дня ${day} у этой строки именно такой знак?
+Также: не пропущен ли кто-то ещё с − / Н / мп?
 
 JSON:
-{"fixes":[{"i":9,"mark":"duty","reason":"у Исмаилова в дне ${day} буква Н"},{"i":12,"mark":"event","reason":"мп"}]}
-i с 1. Только реальные исправления. Если ок — {"fixes":[]}.`
+{"exceptions":[{"n":2,"surname":"Брюкин","glyph":"-","mark":"absent"}],"ok":true}
+
+Верни полный итоговый список exceptions (исправленный). ok=true если черновик был верным.`
 }
 
-function applyFixes(firstMarks, fixes) {
-  const out = firstMarks.map((mark) => ({
-    mark,
-    confidence: 0.8,
-    disagreed: false,
-    firstMark: mark,
-  }))
+function marksFromExceptions(roster, exceptions) {
+  const marks = roster.map(() => 'present')
+  const meta = roster.map(() => ({ confidence: 0.85, disagreed: false, firstMark: 'present' }))
 
-  if (!Array.isArray(fixes)) return out
-
-  for (const fix of fixes) {
-    const i = Number(fix?.i) - 1
-    if (!Number.isInteger(i) || i < 0 || i >= out.length) continue
-    const next = normalizeMark(fix.mark)
-    if (!next) continue
-    const prev = out[i].mark
-    out[i] = {
-      mark: next,
-      confidence: prev === next ? 0.9 : 0.7,
-      disagreed: prev !== next,
-      firstMark: prev,
+  for (const ex of exceptions || []) {
+    let i = Number(ex?.n) - 1
+    if (!Number.isInteger(i) || i < 0 || i >= roster.length) {
+      const sn = String(ex?.surname || '')
+        .trim()
+        .toLowerCase()
+      if (sn) {
+        i = roster.findIndex((r) => r.surname.toLowerCase() === sn)
+      }
+    }
+    if (i < 0 || i >= roster.length) continue
+    const mark = normalizeMark(ex.mark) || normalizeMark(ex.glyph) || 'empty'
+    if (mark === 'present' || mark === 'empty') continue
+    marks[i] = mark
+    meta[i] = {
+      confidence: 0.9,
+      disagreed: false,
+      firstMark: mark,
+      glyph: ex.glyph || null,
     }
   }
-  return out
+
+  return marks.map((mark, i) => ({
+    mark,
+    confidence: meta[i].confidence,
+    disagreed: meta[i].disagreed,
+    firstMark: meta[i].firstMark,
+  }))
 }
 
-function fixesFromParsed(parsed) {
-  if (Array.isArray(parsed?.fixes)) return parsed.fixes
-  // если модель снова вернула полный marks — применяем только отличия от first позже
+function exceptionsFromParsed(parsed) {
+  if (Array.isArray(parsed?.exceptions)) return parsed.exceptions
+  if (Array.isArray(parsed?.fixes)) {
+    return parsed.fixes.map((f) => ({
+      n: f.i,
+      mark: f.mark,
+      surname: f.surname,
+      glyph: f.glyph,
+    }))
+  }
   return null
-}
-
-function mergeFullSecondAsDiffOnly(first, second) {
-  // запасной путь: второй полный массив не затирает первый целиком
-  return first.map((a, i) => {
-    const b = second[i] || a
-    if (a === b) {
-      return { mark: a, confidence: 0.92, disagreed: false, firstMark: a }
-    }
-    if (a === 'present' && b !== 'present' && b !== 'empty') {
-      return { mark: b, confidence: 0.65, disagreed: true, firstMark: a }
-    }
-    if (a !== 'present' && b === 'present') {
-      return { mark: b, confidence: 0.65, disagreed: true, firstMark: a }
-    }
-    return { mark: a, confidence: 0.5, disagreed: true, firstMark: a }
-  })
 }
 
 function repairJson(text) {
@@ -373,46 +358,63 @@ export default {
     const g = group || '0903-ПД3'
 
     try {
+      // Проход 1: только исключения (не +) — точнее для типичного расхода
       const firstUp = await callPolza(env, {
         model,
-        prompt: buildPrompt({ day: dayNum, group: g, roster }),
+        prompt: buildExceptionsPrompt({ day: dayNum, group: g, roster }),
         dataUrl,
       })
-      const firstMarks = marksFromParsed(
-        extractJson(firstUp?.choices?.[0]?.message?.content),
-        roster.length,
-      )
+      const firstParsed = extractJson(firstUp?.choices?.[0]?.message?.content)
+      let exceptions = exceptionsFromParsed(firstParsed) || []
 
+      // Проход 2: подтвердить/дополнить список исключений
       const verifyUp = await callPolza(env, {
         model: verifyModel,
-        prompt: buildVerifyPrompt({ day: dayNum, roster, firstMarks }),
+        prompt: buildConfirmExceptionsPrompt({ day: dayNum, roster, exceptions }),
         dataUrl,
       })
       const verifyParsed = extractJson(verifyUp?.choices?.[0]?.message?.content)
-      const fixes = fixesFromParsed(verifyParsed)
+      const confirmed = exceptionsFromParsed(verifyParsed)
+      if (Array.isArray(confirmed)) exceptions = confirmed
 
+      // Fallback: если модель вернула полный marks вместо exceptions
       let merged
-      if (fixes) {
-        merged = applyFixes(firstMarks, fixes)
-      } else if (Array.isArray(verifyParsed?.marks) || Array.isArray(verifyParsed?.students)) {
-        const secondMarks = marksFromParsed(verifyParsed, roster.length)
-        merged = mergeFullSecondAsDiffOnly(firstMarks, secondMarks)
+      if (
+        (!exceptions.length &&
+          (Array.isArray(firstParsed?.marks) || Array.isArray(verifyParsed?.marks))) ||
+        (!exceptions.length && Array.isArray(verifyParsed?.students))
+      ) {
+        const marks = marksFromParsed(
+          Array.isArray(verifyParsed?.marks) || Array.isArray(verifyParsed?.students)
+            ? verifyParsed
+            : firstParsed,
+          roster.length,
+        )
+        merged = marks.map((mark) => ({
+          mark,
+          confidence: 0.7,
+          disagreed: false,
+          firstMark: mark,
+        }))
       } else {
-        merged = applyFixes(firstMarks, [])
+        merged = marksFromExceptions(roster, exceptions)
       }
 
       const result = normalizeResult(merged, roster, dayNum)
       const filled = result.students.filter((s) => s.mark !== 'empty').length
       const disagreed = result.students.filter((s) => s.disagreed).length
       const usage = sumUsage(firstUp.usage, verifyUp.usage)
+      const specials = result.students.filter((s) => s.mark !== 'present').length
 
       return json({
         ok: true,
         model,
         verifyModel,
         verified: true,
+        mode: 'exceptions',
+        exceptionsCount: exceptions.length,
+        specials,
         disagreed,
-        fixesApplied: Array.isArray(fixes) ? fixes.length : null,
         usage,
         filled,
         result,
