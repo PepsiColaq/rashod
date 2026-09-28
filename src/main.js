@@ -1,5 +1,5 @@
 import './styles.css'
-import { GROUP_CODE, ROSTER, MARKS } from './data/roster.js'
+import { GROUP_CODE, ROSTER, MARKS, QUICK_MARKS } from './data/roster.js'
 import { buildRashodText } from './lib/format.js'
 
 const apiBase = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
@@ -270,7 +270,7 @@ function render() {
     </section>
 
     <section class="card">
-      <p class="hint">Поправь отметки при ошибке. Причину и «мероприятие» вписывай сам.</p>
+      <p class="hint">После распознавания поправь отметки кнопками <b>+</b> / <b>−</b> / <b>Н</b>. Причину и «мероприятие» впиши сам.</p>
       <div id="people">
         ${state.people
           .map((p, i) => {
@@ -280,23 +280,26 @@ function render() {
               <div class="person-top">
                 <div class="person-name">${p.surname}</div>
                 ${
-                  low
-                    ? `<span class="badge warn">низкая уверенность</span>`
-                    : `<span class="badge">${MARKS[p.mark]?.short || '?'}</span>`
+                  low || p.mark === 'empty'
+                    ? `<span class="badge warn">${MARKS[p.mark]?.label || 'проверить'}</span>`
+                    : `<span class="badge">${MARKS[p.mark]?.short || '?'} ${MARKS[p.mark]?.label || ''}</span>`
                 }
               </div>
+              <div class="quick-marks">
+                ${QUICK_MARKS.map((k) => {
+                  const active = p.mark === k ? 'active' : ''
+                  return `<button type="button" class="mark-btn ${active}" data-quick="${k}">${MARKS[k].short}</button>`
+                }).join('')}
+                <select data-field="mark" class="mark-select" aria-label="Другая отметка">
+                  ${Object.entries(MARKS)
+                    .map(
+                      ([k, v]) =>
+                        `<option value="${k}" ${p.mark === k ? 'selected' : ''}>${v.label}</option>`,
+                    )
+                    .join('')}
+                </select>
+              </div>
               <div class="person-grid">
-                <label>
-                  Отметка
-                  <select data-field="mark">
-                    ${Object.entries(MARKS)
-                      .map(
-                        ([k, v]) =>
-                          `<option value="${k}" ${p.mark === k ? 'selected' : ''}>${v.short} — ${v.label}</option>`,
-                      )
-                      .join('')}
-                  </select>
-                </label>
                 <label>
                   Причина (если нет)
                   <input data-field="reason" type="text" placeholder="плохое самочувствие" value="${escapeAttr(p.reason)}" />
@@ -355,20 +358,42 @@ function render() {
 
   app.querySelectorAll('.person').forEach((el) => {
     const i = Number(el.dataset.i)
+
+    const refreshOut = () => {
+      const out = app.querySelector('#out')
+      if (out) {
+        out.value = buildRashodText({
+          group: GROUP_CODE,
+          dateLabel: formatDateRu(state.date),
+          people: state.people,
+        })
+      }
+      const badge = el.querySelector('.badge')
+      const mark = state.people[i].mark
+      if (badge) {
+        badge.textContent = `${MARKS[mark]?.short || '?'} ${MARKS[mark]?.label || ''}`
+        badge.classList.toggle('warn', mark === 'empty' || (state.people[i].confidence != null && state.people[i].confidence < 0.55))
+      }
+      el.querySelectorAll('.mark-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.getAttribute('data-quick') === mark)
+      })
+      const sel = el.querySelector('[data-field="mark"]')
+      if (sel) sel.value = mark
+    }
+
+    el.querySelectorAll('[data-quick]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.people[i].mark = btn.getAttribute('data-quick')
+        refreshOut()
+      })
+    })
+
     el.querySelectorAll('[data-field]').forEach((input) => {
       const field = input.getAttribute('data-field')
       const handler = () => {
         if (field === 'event') state.people[i].event = input.checked
         else state.people[i][field] = input.value
-        // обновляем только текст, без полного ре-рендера полей (фокус)
-        const out = app.querySelector('#out')
-        if (out) {
-          out.value = buildRashodText({
-            group: GROUP_CODE,
-            dateLabel: formatDateRu(state.date),
-            people: state.people,
-          })
-        }
+        refreshOut()
       }
       input.addEventListener('change', handler)
       input.addEventListener('input', handler)

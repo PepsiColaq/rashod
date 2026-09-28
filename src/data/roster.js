@@ -27,12 +27,16 @@ export const ROSTER = [
 ]
 
 export const MARKS = {
-  present: { label: 'На лицо', short: '+' },
-  absent: { label: 'Отсутствует', short: '−' },
-  duty: { label: 'Наряд', short: 'Н' },
-  excused: { label: 'Отпущен', short: 'О' },
-  sick: { label: 'Болен', short: 'Б' },
+  present: { label: 'Есть (+)', short: '+' },
+  absent: { label: 'Нет (−)', short: '−' },
+  duty: { label: 'Наряд (Н)', short: 'Н' },
+  excused: { label: 'Отпущен (О)', short: 'О' },
+  sick: { label: 'Болен (Б)', short: 'Б' },
   unknown: { label: 'Н/П', short: 'Н/П' },
-  unauthorized: { label: 'Самоволка', short: 'С' },
-  empty: { label: 'Пусто', short: '·' },
+  unauthorized: { label: 'Самоволка (С)', short: 'С' },
+  empty: { label: 'Не распознано', short: '?' },
 }
+
+/** Быстрые кнопки в карточке курсанта */
+export const QUICK_MARKS = ['present', 'absent', 'duty']
+
